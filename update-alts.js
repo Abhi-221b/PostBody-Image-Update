@@ -4,6 +4,9 @@ import * as cheerio from 'cheerio';
 import pLimit from 'p-limit';
 import fs from 'fs';
 
+const START = parseInt(process.env.START || '1', 10);   // 1-based, inclusive
+const END   = parseInt(process.env.END   || '13', 10);  // 1-based, inclusive
+const BLOG_ID   = parseInt(process.env.BLOG_ID);        // Blog_ID
 const TOKEN = process.env.HUBSPOT_TOKEN;
 if (!TOKEN) throw new Error('Missing HUBSPOT_TOKEN in .env');
 
@@ -13,7 +16,7 @@ const HEADERS = {
     'Content-Type': 'application/json',
 };
 
-const DRY_RUN = false;      // ← set to false to actually update drafts
+const DRY_RUN = true;      // ← set to false to actually update drafts - true
 const limit = pLimit(3); // max 3 concurrent requests
 
 
@@ -184,19 +187,46 @@ async function api(path, opts = {}, attempt = 1) {
 }
 
 // --- List all posts (generator) ---
-async function* listAllPosts() {
-    let after;
-    do {
-        const qs = new URLSearchParams({
-            limit: '100',
-            property: 'id,name,postBody',
-            contentGroupId: process.env.BLOG_ID,
-        });
-        if (after) qs.set('after', after);
-        const data = await api(`?${qs}`);
-        for (const p of data.results) yield p;
-        after = data.paging?.next?.after;
-    } while (after);
+// async function* listAllPosts() {
+//     let after;
+//     do {
+//         const qs = new URLSearchParams({
+//             limit: '100',
+//             property: 'id,name,postBody',
+//             contentGroupId: process.env.BLOG_ID,
+//         });
+//         if (after) qs.set('after', after);
+//         const data = await api(`?${qs}`);
+//         for (const p of data.results) yield p;
+//         after = data.paging?.next?.after;
+//     } while (after);
+// }
+
+// New Code Replacing listAllPosts with fetchPostsInRange for doing it in batchs of 13 posts
+
+async function fetchPostsInRange() {
+  const all = [];
+  let after;
+
+  do {
+    const qs = new URLSearchParams({
+      limit: '100',
+      property: 'id,name,postBody,publishDate',
+      sort: '-publishDate',         // newest first — matches typical blog listing
+    });
+    if (BLOG_ID) qs.set('contentGroupId', BLOG_ID);
+    if (after)   qs.set('after', after);
+
+    const data = await api(`?${qs}`);
+    all.push(...data.results);
+    after = data.paging?.next?.after;
+  } while (after);
+
+  console.log(`Total posts in blog: ${all.length}`);
+  console.log(`Processing posts ${START}–${END} (1-based, inclusive)`);
+
+  // Slice: START/END are 1-based inclusive
+  return all.slice(START - 1, END);
 }
 
 // --- Rewrite postBody; return new HTML or null if nothing changed ---
@@ -232,38 +262,82 @@ function rewriteBody(html) {
         : null;
 }
 
-// --- Main ---
+// --- old Main ---
+// (async () => {
+//     const log = [];
+//     const tasks = [];
+
+//     for await (const post of listAllPosts()) {
+//         tasks.push(limit(async () => {
+//             const result = rewriteBody(post.postBody);
+//             if (!result) return;
+
+//             log.push({
+//                 id: post.id,
+//                 name: post.name,
+//                 altsAdded: result.altsAdded,
+//                 lazyAdded: result.lazyAdded,
+//                 samples: result.samples,   // first 3 alt decisions per post
+//             });
+
+//             if (!DRY_RUN) {
+//                 await api(`/${post.id}/draft`, {
+//                     method: 'PATCH',
+//                     body: JSON.stringify({ postBody: result.html }),
+//                 });
+//                 console.log(`Draft updated (alts: ${result.altsAdded}, lazy: ${result.lazyAdded}): ${post.name}`);
+//             } else {
+//                 console.log(`[DRY RUN] alts: ${result.altsAdded}, lazy: ${result.lazyAdded} — ${post.name}`);
+//             }
+//         }));
+//     }
+
+//     await Promise.all(tasks);
+//     fs.writeFileSync('changed-posts.json', JSON.stringify(log, null, 2));
+//     console.log(`\nDone. ${log.length} posts ${DRY_RUN ? 'would be' : 'were'} updated.`);
+//     console.log(`Log written to changed-posts.json`);
+// })();
+
+
+// new Main
+
 (async () => {
-    const log = [];
-    const tasks = [];
+  const log = [];
 
-    for await (const post of listAllPosts()) {
-        tasks.push(limit(async () => {
-            const result = rewriteBody(post.postBody);
-            if (!result) return;
+  // Fetch the targeted slice of posts
+  const posts = await fetchPostsInRange();
 
-            log.push({
-                id: post.id,
-                name: post.name,
-                altsAdded: result.altsAdded,
-                lazyAdded: result.lazyAdded,
-                samples: result.samples,   // first 3 alt decisions per post
-            });
+  console.log(`Selected ${posts.length} posts for this batch:\n`);
+  posts.forEach((p, i) => console.log(`  ${START + i}. ${p.name} (${p.id})`));
+  console.log('');
 
-            if (!DRY_RUN) {
-                await api(`/${post.id}/draft`, {
-                    method: 'PATCH',
-                    body: JSON.stringify({ postBody: result.html }),
-                });
-                console.log(`Draft updated (alts: ${result.altsAdded}, lazy: ${result.lazyAdded}): ${post.name}`);
-            } else {
-                console.log(`[DRY RUN] alts: ${result.altsAdded}, lazy: ${result.lazyAdded} — ${post.name}`);
-            }
-        }));
+  const tasks = posts.map(post => limit(async () => {
+    const result = rewriteBody(post.postBody);
+    if (!result) return;
+
+    log.push({
+      id: post.id,
+      name: post.name,
+      altsAdded: result.altsAdded,
+      lazyAdded: result.lazyAdded,
+      samples: result.samples,   // first 3 alt decisions per post
+    });
+
+    if (!DRY_RUN) {
+      await api(`/${post.id}/draft`, {
+        method: 'PATCH',
+        body: JSON.stringify({ postBody: result.html }),
+      });
+      console.log(`Draft updated (alts: ${result.altsAdded}, lazy: ${result.lazyAdded}): ${post.name}`);
+    } else {
+      console.log(`[DRY RUN] alts: ${result.altsAdded}, lazy: ${result.lazyAdded} — ${post.name}`);
     }
+  }));
 
-    await Promise.all(tasks);
-    fs.writeFileSync('changed-posts.json', JSON.stringify(log, null, 2));
-    console.log(`\nDone. ${log.length} posts ${DRY_RUN ? 'would be' : 'were'} updated.`);
-    console.log(`Log written to changed-posts.json`);
+  await Promise.all(tasks);
+
+  const fname = `changed-posts-${START}-${END}.json`;
+  fs.writeFileSync(fname, JSON.stringify(log, null, 2));
+  console.log(`\nDone. ${log.length} posts ${DRY_RUN ? 'would be' : 'were'} updated.`);
+  console.log(`Log written to ${fname}`);
 })();

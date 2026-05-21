@@ -12,7 +12,7 @@ const HEADERS = {
   'Content-Type': 'application/json',
 };
 
-const CONFIRM = true;     // ← set to true to actually push live
+const CONFIRM = true;     // ← set to true to actually push live - false
 const limit   = pLimit(3);
 
 async function api(path, opts = {}, attempt = 1) {
@@ -28,12 +28,14 @@ async function api(path, opts = {}, attempt = 1) {
 }
 
 (async () => {
-  if (!fs.existsSync('changed-posts.json')) {
-    throw new Error('changed-posts.json not found. Run update-alts.js first.');
-  }
+const logFile = process.env.LOG_FILE || 'changed-posts.json';
 
-  const posts = JSON.parse(fs.readFileSync('changed-posts.json', 'utf8'));
-  console.log(`Found ${posts.length} posts to push live.`);
+if (!fs.existsSync(logFile)) {
+  throw new Error(`${logFile} not found. Run update-alts.js first.`);
+}
+
+const posts = JSON.parse(fs.readFileSync(logFile, 'utf8'));
+console.log(`Loaded ${posts.length} posts from ${logFile}.`);
 
   if (!CONFIRM) {
     console.log('CONFIRM is false — exiting without changes.');
